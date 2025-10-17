@@ -187,7 +187,7 @@ class _NaiveHarmonyParser:
             new_text = final_text[self._final_emitted_len :]
             if new_text:
                 chunks.append(FinalChunk(text=new_text))
-                self._final_emitted_len += len(new_text)
+            self._final_emitted_len = len(final_text)
             if final_complete and not self._final_closed:
                 chunks.append(FinalChunk(text="", is_terminal=True))
                 self._final_closed = True
@@ -205,7 +205,7 @@ class _NaiveHarmonyParser:
             new_text = final_text[self._final_emitted_len :]
             if new_text:
                 chunks.append(FinalChunk(text=new_text))
-                self._final_emitted_len += len(new_text)
+            self._final_emitted_len = len(final_text)
         if final_complete and not self._final_closed:
             chunks.append(FinalChunk(text="", is_terminal=True))
         self._final_closed = True
@@ -221,7 +221,7 @@ class _NaiveHarmonyParser:
         start = msg_idx + len(self.MESSAGE_MARKER)
         end = full_text.find(self.END_MARKER, start)
         if end == -1:
-            return full_text[start:], False
+            return self._trim_partial_end(full_text[start:]), False
         return full_text[start:end], True
 
     def _extract_tools(self, full_text: str) -> List[ParsedChunk]:
@@ -252,6 +252,13 @@ class _NaiveHarmonyParser:
             idx = call_idx + len(self.CALL_MARKER)
             self._tool_cursor = idx
         return chunks
+
+    def _trim_partial_end(self, text: str) -> str:
+        for length in range(len(self.END_MARKER) - 1, 0, -1):
+            prefix = self.END_MARKER[:length]
+            if text.endswith(prefix):
+                return text[: -length]
+        return text
 
 
 def _ensure_sequence(value: Any) -> Sequence[Any]:

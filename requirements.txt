@@ -1,1 +1,1 @@
--e .[harmony]
+-e .[harmony,dev]

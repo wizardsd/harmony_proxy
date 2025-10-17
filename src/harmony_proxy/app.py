@@ -2,40 +2,51 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 import time
 import uuid
+from contextlib import asynccontextmanager
 from typing import Any, Callable, Dict, Iterable, List
+
+try:  # ensure starlette imports python_multipart without deprecation warning
+    import python_multipart.multipart as _python_multipart
+
+    sys.modules.setdefault("multipart", _python_multipart)
+except ImportError:  # pragma: no cover - optional dependency
+    pass
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from .config import ProxyMode, load_config
+from .config import ProxyConfig, ProxyMode, load_config
 from .parser import FinalChunk, HarmonyStreamParser, ToolCallChunk
 from .sse import format_sse_done, format_sse_event
 from .upstream import UpstreamClient, UpstreamError
 
 
-config = load_config()
+config: ProxyConfig = load_config()
 logging.basicConfig(level=getattr(logging, config.log_level, logging.INFO))
 logger = logging.getLogger("harmony_proxy")
 
-app = FastAPI(title="Harmony Parser Proxy")
 
-
-@app.on_event("startup")
-async def on_startup() -> None:
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global config
+    config = load_config()
     app.state.config = config
     app.state.upstream = UpstreamClient(
         base_url=config.upstream_base_url,
         connect_timeout=config.connect_timeout,
         read_timeout=config.read_timeout,
     )
+    try:
+        yield
+    finally:
+        upstream: UpstreamClient = app.state.upstream
+        await upstream.aclose()
 
 
-@app.on_event("shutdown")
-async def on_shutdown() -> None:
-    upstream: UpstreamClient = app.state.upstream
-    await upstream.aclose()
+app = FastAPI(title="Harmony Parser Proxy", lifespan=lifespan)
 
 
 @app.get("/healthz")

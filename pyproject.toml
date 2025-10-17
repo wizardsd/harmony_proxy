@@ -12,11 +12,15 @@ dependencies = [
     "httpx>=0.25.0,<0.28.0",
     "pydantic>=2.4.0,<3.0.0",
     "python-dotenv>=1.0.0,<2.0.0",
+    "python-multipart>=0.0.19",
 ]
 
 [project.optional-dependencies]
 harmony = [
     "openai-harmony>=0.0.4",
+]
+dev = [
+    "pytest>=7.4",
 ]
 
 [build-system]
