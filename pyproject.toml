@@ -13,10 +13,6 @@ dependencies = [
     "pydantic>=2.4.0,<3.0.0",
     "python-dotenv>=1.0.0,<2.0.0",
     "python-multipart>=0.0.19",
-]
-
-[project.optional-dependencies]
-harmony = [
     "openai-harmony>=0.0.4",
 ]
 dev = [
