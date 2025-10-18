@@ -11,6 +11,8 @@ from openai_harmony import (
     load_harmony_encoding,
 )
 
+from .harmony_fallback import extract_final_text
+
 
 log = logging.getLogger(__name__)
 
@@ -42,11 +44,14 @@ class HarmonyStreamParser:
     for OpenAI-compatible streaming responses.
     """
 
-    def __init__(self, encoding_name: str = "HarmonyGptOss", role: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        encoding_name: str = "HarmonyGptOss",
+        role: Optional[str] = None,
+        prepend_missing_start: bool = True,
+    ) -> None:
         self._encoding_name = encoding_name
         self._encoding = self._load_encoding(encoding_name)
-        # The role parameter is optional for the native parser; leaving it unset
-        # keeps the parser adaptable to commentary / analysis tool messages.
         self._parser = HarmonyStreamableParser(self._encoding, role=None)
 
         self._buffer: str = ""
@@ -58,16 +63,32 @@ class HarmonyStreamParser:
         self._tool_counter: int = 0
         self._raw_segments: List[str] = []
         self._had_error: bool = False
-        self._error_reported: bool = False
+
+        self._prepend_missing_start = prepend_missing_start
+        self._saw_harmony_start: bool = False
+        self._synthetic_mode: bool = False
+        self._synthetic_buffer: List[str] = []
 
     def feed(self, delta: str) -> List[ParsedChunk]:
         if not delta:
             return []
 
+        if (
+            self._prepend_missing_start
+            and not self._synthetic_mode
+            and not self._saw_harmony_start
+        ):
+            if "<|start|>assistant" in delta:
+                self._saw_harmony_start = True
+            else:
+                self._synthetic_mode = True
+
         self._raw_segments.append(delta)
-        if self._had_error:
-            # Once the parser fails, we defer to heuristic fallback.
+
+        if self._synthetic_mode:
+            self._synthetic_buffer.append(delta)
             return []
+
         self._buffer += delta
         chunks: List[ParsedChunk] = []
 
@@ -81,6 +102,18 @@ class HarmonyStreamParser:
         return chunks
 
     def close(self) -> List[ParsedChunk]:
+        if self._synthetic_mode:
+            raw = "".join(self._synthetic_buffer)
+            text = extract_final_text(raw)
+            if not text.strip():
+                text = raw.strip()
+            chunks: List[ParsedChunk] = []
+            if text:
+                chunks.append(FinalChunk(text=text))
+                chunks.append(FinalChunk(text="", is_terminal=True))
+            self._synthetic_buffer.clear()
+            return chunks
+
         chunks: List[ParsedChunk] = []
         if self._cursor < len(self._buffer):
             remaining = self._buffer[self._cursor :]
@@ -101,41 +134,25 @@ class HarmonyStreamParser:
     def _process_segment(self, segment: str) -> List[ParsedChunk]:
         chunks: List[ParsedChunk] = []
 
-        if self._had_error:
-            return chunks
-
         try:
             tokens = self._encoding.encode(segment, allowed_special="all")
         except HarmonyError as exc:
-            if not self._error_reported:
-                log.warning(
-                    "Failed to encode harmony segment; dropping text. segment=%r error=%s",
-                    segment,
-                    exc,
-                )
-                self._error_reported = True
+            log.warning("Failed to encode harmony segment; dropping text. segment=%r error=%s", segment, exc)
             self._had_error = True
             return chunks
 
         for token in tokens:
             chunks.extend(self._process_token(token))
-            if self._had_error:
-                break
 
         return chunks
 
     def _process_token(self, token: int) -> List[ParsedChunk]:
         chunks: List[ParsedChunk] = []
 
-        if self._had_error:
-            return chunks
-
         try:
             self._parser.process(token)
         except HarmonyError as exc:
-            if not self._error_reported:
-                log.warning("Harmony parser failed on token %s: %s", token, exc)
-                self._error_reported = True
+            log.warning("Harmony parser failed on token %s: %s", token, exc)
             self._had_error = True
             return chunks
 
@@ -164,7 +181,6 @@ class HarmonyStreamParser:
                 chunks.append(tool_chunk)
             self._reset_message_state()
         elif token == END_TOKEN_ID:
-            # End of a message; clear transient state.
             self._reset_message_state()
 
         return chunks
@@ -185,7 +201,6 @@ class HarmonyStreamParser:
         self._active_channel = None
         self._active_recipient = None
         self._tool_buffer.clear()
-        self._error_reported = False
 
     def _pop_processable_segment(self) -> str:
         if self._cursor >= len(self._buffer):
@@ -220,7 +235,6 @@ class HarmonyStreamParser:
             try:
                 name = HarmonyEncodingName(encoding_name)
             except ValueError:
-                # Allow arbitrary strings that the underlying Rust binding recognises.
                 name = encoding_name
         return load_harmony_encoding(name)
 
@@ -234,4 +248,6 @@ class HarmonyStreamParser:
     def reset_history(self) -> None:
         self._raw_segments.clear()
         self._had_error = False
-        self._error_reported = False
+        self._saw_harmony_start = False
+        self._synthetic_mode = False
+        self._synthetic_buffer.clear()

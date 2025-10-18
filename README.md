@@ -69,6 +69,7 @@ Environment variables:
 | `EXTRA_STOP_SEQUENCES` | *(empty)* | Comma-separated list of extra stop strings. |
 | `LOG_LEVEL` | `INFO` | Logging verbosity. |
 | `METRICS_ENABLED` | `true` | Toggle Prometheus metrics collection and `/metrics`. |
+| `PREPEND_MISSING_HARMONY_START` | `true` | When true, injects `<|start|>assistant` if upstream omits it (workaround for non-compliant streams). |
 
 Environment variables can be provided via `.env`, exported in the shell, or using
 PowerShell's `setx`/`$env:` for Windows users.

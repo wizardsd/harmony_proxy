@@ -41,3 +41,17 @@ def test_parser_extracts_tool_calls():
     tool_chunk = tool_chunks[0]
     assert tool_chunk.name == "read_file"
     assert tool_chunk.arguments == '{"path":"foo.txt"}'
+
+
+def test_parser_injects_start_token_when_missing():
+    parser = HarmonyStreamParser()
+    sample = "<|channel|>final<|message|>Injected<|return|>"
+
+    chunks = parser.feed(sample)
+    chunks.extend(parser.close())
+
+    final_text = "".join(
+        chunk.text for chunk in chunks if isinstance(chunk, FinalChunk) and chunk.text
+    )
+    assert final_text == "Injected"
+    assert not parser.had_error

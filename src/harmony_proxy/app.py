@@ -126,6 +126,7 @@ async def _streaming_response(payload: Dict[str, Any], request: Request):
     model = payload.get("model", "gpt-oss")
     parser = HarmonyStreamParser(
         encoding_name=config.harmony_encoding_name,
+        prepend_missing_start=config.prepend_missing_start,
     )
 
     role_sent = False
@@ -391,7 +392,10 @@ def _normalize_non_streaming(
 
 
 def _parse_full_text(content: str) -> tuple[str, List[ToolCallChunk], bool]:
-    parser = HarmonyStreamParser(encoding_name=config.harmony_encoding_name)
+    parser = HarmonyStreamParser(
+        encoding_name=config.harmony_encoding_name,
+        prepend_missing_start=config.prepend_missing_start,
+    )
     final_parts: List[str] = []
     tool_chunks: List[ToolCallChunk] = []
 

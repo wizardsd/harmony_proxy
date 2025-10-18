@@ -62,6 +62,7 @@ class ProxyConfig:
     max_retries: int = _parse_int("MAX_RETRIES", 3)
     retry_backoff_seconds: float = _parse_float("RETRY_BACKOFF_SECONDS", 0.5)
     metrics_enabled: bool = _get_env_bool("METRICS_ENABLED", True)
+    prepend_missing_start: bool = _get_env_bool("PREPEND_MISSING_HARMONY_START", True)
     harmony_stops_enabled: bool = _get_env_bool("HARMONY_STOPS_ENABLED", True)
     log_level: str = os.getenv("LOG_LEVEL", "INFO").upper()
     extra_stop_sequences: List[str] = field(default_factory=_parse_stops)
