@@ -58,12 +58,16 @@ class HarmonyStreamParser:
         self._tool_counter: int = 0
         self._raw_segments: List[str] = []
         self._had_error: bool = False
+        self._error_reported: bool = False
 
     def feed(self, delta: str) -> List[ParsedChunk]:
         if not delta:
             return []
 
         self._raw_segments.append(delta)
+        if self._had_error:
+            # Once the parser fails, we defer to heuristic fallback.
+            return []
         self._buffer += delta
         chunks: List[ParsedChunk] = []
 
@@ -97,25 +101,41 @@ class HarmonyStreamParser:
     def _process_segment(self, segment: str) -> List[ParsedChunk]:
         chunks: List[ParsedChunk] = []
 
+        if self._had_error:
+            return chunks
+
         try:
             tokens = self._encoding.encode(segment, allowed_special="all")
         except HarmonyError as exc:
-            log.warning("Failed to encode harmony segment; dropping text. segment=%r error=%s", segment, exc)
+            if not self._error_reported:
+                log.warning(
+                    "Failed to encode harmony segment; dropping text. segment=%r error=%s",
+                    segment,
+                    exc,
+                )
+                self._error_reported = True
             self._had_error = True
             return chunks
 
         for token in tokens:
             chunks.extend(self._process_token(token))
+            if self._had_error:
+                break
 
         return chunks
 
     def _process_token(self, token: int) -> List[ParsedChunk]:
         chunks: List[ParsedChunk] = []
 
+        if self._had_error:
+            return chunks
+
         try:
             self._parser.process(token)
         except HarmonyError as exc:
-            log.warning("Harmony parser failed on token %s: %s", token, exc)
+            if not self._error_reported:
+                log.warning("Harmony parser failed on token %s: %s", token, exc)
+                self._error_reported = True
             self._had_error = True
             return chunks
 
@@ -165,6 +185,7 @@ class HarmonyStreamParser:
         self._active_channel = None
         self._active_recipient = None
         self._tool_buffer.clear()
+        self._error_reported = False
 
     def _pop_processable_segment(self) -> str:
         if self._cursor >= len(self._buffer):
@@ -213,3 +234,4 @@ class HarmonyStreamParser:
     def reset_history(self) -> None:
         self._raw_segments.clear()
         self._had_error = False
+        self._error_reported = False
