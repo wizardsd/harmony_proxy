@@ -13,7 +13,7 @@ without modifications.
 - Streaming pipeline that normalises upstream Harmony deltas into RFC-compliant Server-
   Sent Events. `analysis`/`commentary` channels are removed; only `final` (and optional
   tool calls) reach the client.
-- Uses the `openai_harmony.StreamableParser` when available for robust token-level
+- Uses the `openai_harmony.StreamableParser` for robust token-level
   parsing. If Harmony output is malformed, the proxy heuristically recovers the last
   `final` channel so IDEs still receive a usable answer.
 - Optional tool-call bridges:
@@ -73,6 +73,24 @@ Environment variables:
 Environment variables can be provided via `.env`, exported in the shell, or using
 PowerShell's `setx`/`$env:` for Windows users.
 
+### Installing Prebuilt Wheels from Artifactory
+
+If your team publishes releases to Artifactory (see `BUILDING.md`), install with:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install \
+  --index-url https://artifactory.example.com/artifactory/api/pypi/harmony-pypi/simple \
+  --extra-index-url https://pypi.org/simple \
+  harmony-proxy==<desired-version>
+```
+
+Replace `https://artifactory.example.com/artifactory/api/pypi/harmony-pypi/simple`
+with your repository URL. The `--extra-index-url` flag keeps the standard PyPI
+available for transitive dependencies that are not mirrored in Artifactory.
+
 ## Development
 
 - `python -m compileall src` ensures syntax correctness.
@@ -81,7 +99,6 @@ PowerShell's `setx`/`$env:` for Windows users.
 
 ## Known Limitations
 
-- The naive Harmony parser is a best-effort fallback. Install `openai_harmony` for full
-  fidelity parsing.
+- The proxy requires the `openai_harmony` package at runtime. Without it, the parser import fails.
 - Only the `/v1/chat/completions` endpoint is normalised. `/v1/responses` is forwarded
   untouched for compatibility testing.
