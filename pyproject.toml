@@ -14,6 +14,7 @@ dependencies = [
     "python-dotenv>=1.0.0,<2.0.0",
     "python-multipart>=0.0.19",
     "openai-harmony>=0.0.4",
+    "prometheus-client>=0.16.0,<1.0.0",
 ]
 dev = [
     "pytest>=7.4",

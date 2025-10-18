@@ -18,6 +18,12 @@ HARMONY_WITH_TOOL = (
     "<|end|>"
 )
 
+MALFORMED_FINAL = (
+    "<|start|>assistant"
+    "<|channel|>final"
+    "<|message|>Recovered output"
+)
+
 
 def make_config(**overrides):
     base = {
@@ -96,16 +102,52 @@ def test_emit_tool_chunk_modes():
         return b"bytes"
 
     # FINAL_ONLY -> empty list
-    assert _emit_tool_chunk(tool, ProxyMode.FINAL_ONLY, fake_build, {}) == []
+    assert (
+        _emit_tool_chunk(
+            tool,
+            ProxyMode.FINAL_ONLY,
+            fake_build,
+            {},
+            "chat_completions",
+        )
+        == []
+    )
 
     # FINAL_PLUS_TOOLS_TEXT -> single content delta
     captured.clear()
-    result = _emit_tool_chunk(tool, ProxyMode.FINAL_PLUS_TOOLS_TEXT, fake_build, {})
+    result = _emit_tool_chunk(
+        tool,
+        ProxyMode.FINAL_PLUS_TOOLS_TEXT,
+        fake_build,
+        {},
+        "chat_completions",
+    )
     assert result == [b"bytes"]
     assert captured[0]["content"].startswith("\n[tool:execute]")
 
     # OPENAI_TOOL_CALLS -> tool_calls delta
     captured.clear()
-    result = _emit_tool_chunk(tool, ProxyMode.OPENAI_TOOL_CALLS, fake_build, {})
+    result = _emit_tool_chunk(
+        tool,
+        ProxyMode.OPENAI_TOOL_CALLS,
+        fake_build,
+        {},
+        "chat_completions",
+    )
     assert result == [b"bytes"]
     assert captured[0]["tool_calls"][0]["function"]["name"] == "execute"
+
+
+def test_normalize_non_streaming_fallback_on_malformed_final():
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": MALFORMED_FINAL,
+                }
+            }
+        ]
+    }
+    result = _normalize_non_streaming(payload, ProxyMode.FINAL_ONLY)
+    assert result["choices"][0]["message"]["content"] == "Recovered output"

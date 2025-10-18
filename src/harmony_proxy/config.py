@@ -27,6 +27,16 @@ def _parse_float(name: str, default: float) -> float:
         return default
 
 
+def _parse_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
 def _parse_proxy_mode() -> ProxyMode:
     raw = os.getenv("PROXY_MODE", ProxyMode.FINAL_ONLY.value)
     try:
@@ -49,6 +59,9 @@ class ProxyConfig:
     connect_timeout: float = _parse_float("CONNECT_TIMEOUT", 10.0)
     read_timeout: float = _parse_float("READ_TIMEOUT", 120.0)
     no_final_timeout: float = _parse_float("NO_FINAL_TIMEOUT", 90.0)
+    max_retries: int = _parse_int("MAX_RETRIES", 3)
+    retry_backoff_seconds: float = _parse_float("RETRY_BACKOFF_SECONDS", 0.5)
+    metrics_enabled: bool = _get_env_bool("METRICS_ENABLED", True)
     harmony_stops_enabled: bool = _get_env_bool("HARMONY_STOPS_ENABLED", True)
     log_level: str = os.getenv("LOG_LEVEL", "INFO").upper()
     extra_stop_sequences: List[str] = field(default_factory=_parse_stops)

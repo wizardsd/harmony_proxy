@@ -56,11 +56,14 @@ class HarmonyStreamParser:
         self._active_recipient: Optional[str] = None
         self._tool_buffer: List[str] = []
         self._tool_counter: int = 0
+        self._raw_segments: List[str] = []
+        self._had_error: bool = False
 
     def feed(self, delta: str) -> List[ParsedChunk]:
         if not delta:
             return []
 
+        self._raw_segments.append(delta)
         self._buffer += delta
         chunks: List[ParsedChunk] = []
 
@@ -85,6 +88,7 @@ class HarmonyStreamParser:
             self._parser.process_eos()
         except HarmonyError as exc:  # pragma: no cover - defensive
             log.debug("Harmony parser process_eos failed: %s", exc)
+            self._had_error = True
 
         self._buffer = ""
         self._cursor = 0
@@ -97,6 +101,7 @@ class HarmonyStreamParser:
             tokens = self._encoding.encode(segment, allowed_special="all")
         except HarmonyError as exc:
             log.warning("Failed to encode harmony segment; dropping text. segment=%r error=%s", segment, exc)
+            self._had_error = True
             return chunks
 
         for token in tokens:
@@ -111,6 +116,7 @@ class HarmonyStreamParser:
             self._parser.process(token)
         except HarmonyError as exc:
             log.warning("Harmony parser failed on token %s: %s", token, exc)
+            self._had_error = True
             return chunks
 
         channel = self._parser.current_channel
@@ -196,3 +202,14 @@ class HarmonyStreamParser:
                 # Allow arbitrary strings that the underlying Rust binding recognises.
                 name = encoding_name
         return load_harmony_encoding(name)
+
+    @property
+    def had_error(self) -> bool:
+        return self._had_error
+
+    def get_raw_text(self) -> str:
+        return "".join(self._raw_segments)
+
+    def reset_history(self) -> None:
+        self._raw_segments.clear()
+        self._had_error = False

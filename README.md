@@ -14,13 +14,18 @@ without modifications.
   Sent Events. `analysis`/`commentary` channels are removed; only `final` (and optional
   tool calls) reach the client.
 - Uses the `openai_harmony.StreamableParser` when available for robust token-level
-  parsing. Falls back to a heuristic parser if the bindings are missing.
+  parsing. If Harmony output is malformed, the proxy heuristically recovers the last
+  `final` channel so IDEs still receive a usable answer.
 - Optional tool-call bridges:
   - `final_only` (default): discard Harmony tool calls entirely.
   - `final_plus_tools_text`: renders tool calls as human-readable bracket blocks.
   - `openai_tool_calls`: maps Harmony tool calls to OpenAI `tool_calls` objects.
 - Supports timeout guards, Harmony stop tokens (`<|return|>`, `<|call|>`), and extra
   stop sequences via configuration.
+- Resilient upstream adapter with bounded retries/backoff and a `/readyz` endpoint that
+  confirms upstream reachability.
+- Prometheus metrics exposed at `/metrics` including request counts, forwarded chunks,
+  tool-call usage, and parser fallbacks.
 
 ## Getting Started
 
@@ -58,9 +63,12 @@ Environment variables:
 | `CONNECT_TIMEOUT` | `10.0` | Connection timeout for upstream requests (seconds). |
 | `READ_TIMEOUT` | `120.0` | Read timeout for upstream responses (seconds). |
 | `NO_FINAL_TIMEOUT` | `90.0` | Aborts streaming responses if no `final` channel token is seen in this window. |
+| `MAX_RETRIES` | `3` | Maximum number of retry attempts for upstream requests (streaming and batched). |
+| `RETRY_BACKOFF_SECONDS` | `0.5` | Initial backoff delay (seconds) for retries; doubles on each attempt. |
 | `HARMONY_STOPS_ENABLED` | `true` | Automatically add `<|return|>` and `<|call|>` stop sequences. |
 | `EXTRA_STOP_SEQUENCES` | *(empty)* | Comma-separated list of extra stop strings. |
 | `LOG_LEVEL` | `INFO` | Logging verbosity. |
+| `METRICS_ENABLED` | `true` | Toggle Prometheus metrics collection and `/metrics`. |
 
 Environment variables can be provided via `.env`, exported in the shell, or using
 PowerShell's `setx`/`$env:` for Windows users.
