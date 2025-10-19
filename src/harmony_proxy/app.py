@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 import time
 import uuid
@@ -127,6 +128,126 @@ def strip_channel_prefix(text: str) -> str:
     return cleaned
 
 
+_HARMONY_TAG_PATTERN = re.compile(r"<\|[^>]*\|>")
+_HARMONY_MESSAGE_TOKEN = "<|message|>"
+_HARMONY_START_TOKEN = "<|start|>assistant"
+
+
+def _flatten_message_content(content: Any) -> Any:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return content
+
+    pieces: List[str] = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        part_type = part.get("type")
+        text_value = None
+        if part_type == "text":
+            text_value = part.get("text")
+        elif part_type == "input_text":
+            text_value = part.get("input_text")
+        elif part_type == "tool_result":
+            # Tool results are usually structured; keep them untouched.
+            return content
+        if isinstance(text_value, str) and text_value.strip():
+            pieces.append(text_value)
+
+    if not pieces:
+        return content
+    if len(pieces) == 1:
+        return pieces[0]
+    return "\n\n".join(pieces)
+
+
+def _strip_harmony_tags(text: str) -> str:
+    if not text:
+        return ""
+    return _HARMONY_TAG_PATTERN.sub("", text).strip()
+
+
+def _extract_channel_segments(raw: str, channel: str) -> List[str]:
+    if not raw:
+        return []
+    token = f"<|channel|>{channel}"
+    segments: List[str] = []
+    cursor = 0
+    while True:
+        channel_idx = raw.find(token, cursor)
+        if channel_idx == -1:
+            break
+        search_from = channel_idx + len(token)
+        message_idx = raw.find(_HARMONY_MESSAGE_TOKEN, search_from)
+        if message_idx == -1:
+            cursor = search_from
+            continue
+        message_start = message_idx + len(_HARMONY_MESSAGE_TOKEN)
+        message_end = raw.find("<|", message_start)
+        if message_end == -1:
+            message_end = len(raw)
+        segment = raw[message_start:message_end]
+        cleaned = _strip_harmony_tags(segment)
+        if cleaned:
+            segments.append(cleaned)
+        cursor = message_start
+    return segments
+
+
+def _normalize_kilocode_payload(payload: Dict[str, Any], mode: ProxyMode) -> Dict[str, Any]:
+    if mode != ProxyMode.KILOCODE:
+        return payload
+
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return payload
+
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+
+        flattened = _flatten_message_content(message.get("content"))
+        if isinstance(flattened, str):
+            message["content"] = flattened
+        content = message.get("content")
+
+        reasoning = message.pop("reasoning_content", None)
+        if isinstance(reasoning, str) and reasoning.strip():
+            message.setdefault("thinking", reasoning.strip())
+
+        if not isinstance(content, str):
+            continue
+        if "<|channel|>" not in content:
+            continue
+
+        prefix = ""
+        start_idx = content.find(_HARMONY_START_TOKEN)
+        if start_idx > 0:
+            prefix = content[:start_idx].strip()
+
+        final_text = extract_final_text(content)
+        cleaned_final = final_text.strip() if final_text else ""
+        pieces = [part for part in (prefix, cleaned_final) if part]
+        if not pieces:
+            combined = _strip_harmony_tags(content)
+        else:
+            combined = "\n".join(pieces)
+
+        if combined:
+            message["content"] = combined
+        else:
+            message.pop("content", None)
+
+        analysis_segments = _extract_channel_segments(content, "analysis")
+        if analysis_segments:
+            message["thinking"] = "\n\n".join(analysis_segments)
+        elif "thinking" in message and not message["thinking"]:
+            message.pop("thinking", None)
+
+    return payload
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global config
@@ -195,6 +316,7 @@ async def chat_completions(request: Request) -> Response:
         stream=initial_stream,
     )
     _apply_stop_tokens(payload, config)
+    _normalize_kilocode_payload(payload, config.proxy_mode)
 
     stream = bool(payload.get("stream"))
     upstream: UpstreamClient = app.state.upstream
@@ -256,6 +378,7 @@ async def responses(request: Request) -> Response:
         payload=payload,
         stream=stream,
     )
+    _normalize_kilocode_payload(payload, config.proxy_mode)
     try:
         upstream_result = await upstream.chat_completions(payload, trace_id=request_id)
     except UpstreamError as exc:
@@ -685,11 +808,23 @@ def _parse_full_text(content: str) -> tuple[str, List[ToolCallChunk], bool]:
     final_parts: List[str] = []
     tool_chunks: List[ToolCallChunk] = []
 
-    for chunk in parser.feed(content):
-        if isinstance(chunk, FinalChunk):
-            final_parts.append(chunk.text)
-        elif isinstance(chunk, ToolCallChunk):
-            tool_chunks.append(chunk)
+    working = content or ""
+    prefix = ""
+    if working:
+        start_idx = working.find("<|start|>")
+        if start_idx > 0:
+            prefix = working[:start_idx]
+            working = working[start_idx:]
+        elif start_idx == -1:
+            prefix = working
+            working = ""
+
+    if working:
+        for chunk in parser.feed(working):
+            if isinstance(chunk, FinalChunk):
+                final_parts.append(chunk.text)
+            elif isinstance(chunk, ToolCallChunk):
+                tool_chunks.append(chunk)
     for chunk in parser.close():
         if isinstance(chunk, FinalChunk):
             final_parts.append(chunk.text)
@@ -699,9 +834,22 @@ def _parse_full_text(content: str) -> tuple[str, List[ToolCallChunk], bool]:
     raw_text = parser.get_raw_text() or content
     parser.reset_history()
 
+    used_fallback = False
+    combined = "".join(final_parts)
     if not final_parts:
-        return extract_final_text(raw_text), tool_chunks, True
-    return "".join(final_parts), tool_chunks, False
+        combined = extract_final_text(raw_text)
+        used_fallback = True
+
+    prefix_clean = _strip_harmony_tags(prefix).strip()
+    combined = combined.strip()
+    if prefix_clean:
+        if not combined:
+            combined = prefix_clean
+        else:
+            if combined != prefix_clean and prefix_clean not in combined:
+                combined = f"{prefix_clean}\n\n{combined}"
+
+    return combined, tool_chunks, used_fallback
 
 
 async def _read_json(request: Request) -> Dict[str, Any]:

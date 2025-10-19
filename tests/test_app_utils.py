@@ -42,6 +42,17 @@ MALFORMED_FINAL = (
     "<|message|>Recovered output"
 )
 
+HARMONY_WITH_LEADING_PLAIN = (
+    "Result text"
+    "<|start|>assistant"
+    "<|channel|>analysis"
+    "<|message|>analysis block"
+    "<|start|>assistant"
+    "<|channel|>final"
+    "<|message|>Result text"
+    "<|end|>"
+)
+
 
 def make_config(**overrides):
     base = {
@@ -142,6 +153,22 @@ def test_normalize_non_streaming_kilocode():
     tool_call = message["tool_calls"][0]["function"]
     assert tool_call["name"] == "tool_x"
     assert tool_call["arguments"] == "{\"arg\":1}"
+
+
+def test_normalize_non_streaming_kilocode_handles_plain_prefix():
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": HARMONY_WITH_LEADING_PLAIN,
+                }
+            }
+        ]
+    }
+    result = _normalize_non_streaming(copy.deepcopy(payload), ProxyMode.KILOCODE)
+    content = result["choices"][0]["message"]["content"]
+    assert content == "Result text"
 
 
 def test_emit_tool_chunk_modes():

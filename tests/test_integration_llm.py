@@ -2,12 +2,15 @@ import asyncio
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
+from fastapi.testclient import TestClient
 
 from harmony_proxy.harmony_fallback import extract_final_text
 from harmony_proxy.parser import FinalChunk, HarmonyStreamParser
 from harmony_proxy.upstream import UpstreamClient
+from harmony_proxy.app import app
 
 
 pytestmark = pytest.mark.integration
@@ -97,3 +100,97 @@ def test_llm_roundtrip_hi():
     assert not parser_had_errors, "Harmony stream contained unexpected formatting; see logs"
     assert response_text, "LLM returned an empty response for 'Hi'"
     assert any(token in response_text.lower() for token in ("hi", "hello")), response_text
+
+
+@pytest.mark.skipif(
+    not os.getenv("UPSTREAM_BASE_URL"),
+    reason="UPSTREAM_BASE_URL must point at a running llama.cpp-compatible server.",
+)
+def test_llm_kilocode_history_is_normalised_before_upstream():
+    model = os.getenv("LLM_MODEL", "gpt-oss")
+
+    harmony_history = (
+        "<|start|>assistant"
+        "<|channel|>analysis"
+        "<|message|>Considering how to answer the greeting.<|end|>"
+        "<|start|>assistant"
+        "<|channel|>final"
+        "<|message|>Hello from the legacy bridge!<|end|>"
+    )
+
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "user", "content": "Please respond with a friendly greeting."},
+            {"role": "assistant", "content": harmony_history},
+            {"role": "user", "content": "Say hello again."},
+        ],
+    }
+
+    with TestClient(app) as client:
+        response = client.post("/v1/chat/completions", json=payload)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    choices = body.get("choices")
+    assert isinstance(choices, list) and choices, "proxy returned no choices"
+    message = choices[0].get("message", {})
+    assert isinstance(message.get("content"), str) and message["content"].strip(), "empty assistant reply"
+
+
+@pytest.mark.skipif(
+    not os.getenv("UPSTREAM_BASE_URL"),
+    reason="UPSTREAM_BASE_URL must point at a running llama.cpp-compatible server.",
+)
+def test_llm_kilocode_multisegment_user_content_is_flattened():
+    class RecordingUpstream:
+        def __init__(self) -> None:
+            self.captured_payload: dict[str, Any] | None = None
+
+        async def chat_completions(self, payload, trace_id=None):  # type: ignore[override]
+            self.captured_payload = payload
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "<|start|>assistant<|channel|>final<|message|>Ready<|end|>",
+                        }
+                    }
+                ]
+            }
+
+        async def stream_chat_completions(self, payload, trace_id=None):  # pragma: no cover
+            raise AssertionError("streaming not expected in this test")
+
+        async def aclose(self):  # pragma: no cover
+            pass
+
+    payload = {
+        "model": os.getenv("LLM_MODEL", "gpt-oss"),
+        "messages": [
+            {"role": "system", "content": "Act as a planner."},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "<task>Summarise recent patches</task>"},
+                    {
+                        "type": "text",
+                        "text": "<environment_details>Repository contains src/ and tests/</environment_details>",
+                    },
+                ],
+            },
+        ],
+    }
+
+    recorder = RecordingUpstream()
+    with TestClient(app) as client:
+        client.app.state.upstream = recorder  # type: ignore[attr-defined]
+        response = client.post("/v1/chat/completions", json=payload)
+
+    assert response.status_code == 200, response.text
+    assert recorder.captured_payload is not None, "proxy did not forward payload to upstream"
+    forwarded_messages = recorder.captured_payload["messages"]
+    assert isinstance(forwarded_messages[1]["content"], str)
+    assert "<task>Summarise recent patches</task>" in forwarded_messages[1]["content"]
+    assert "<environment_details>" in forwarded_messages[1]["content"]
