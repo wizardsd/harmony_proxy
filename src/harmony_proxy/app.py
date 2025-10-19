@@ -131,6 +131,22 @@ def strip_channel_prefix(text: str) -> str:
 _HARMONY_TAG_PATTERN = re.compile(r"<\|[^>]*\|>")
 _HARMONY_MESSAGE_TOKEN = "<|message|>"
 _HARMONY_START_TOKEN = "<|start|>assistant"
+_PLAIN_TOOL_NAMES = (
+    "update_todo_list",
+    "ask_followup_question",
+    "switch_mode",
+    "attempt_completion",
+    "new_task",
+    "codebase_search",
+    "read_file",
+    "search_files",
+    "list_files",
+    "fetch_instructions",
+)
+_PLAIN_TOOL_PATTERN = re.compile(
+    r"<(?P<name>(" + "|".join(_PLAIN_TOOL_NAMES) + r"))\b[^>]*>.*?</\1>",
+    re.DOTALL,
+)
 
 
 def _flatten_message_content(content: Any) -> Any:
@@ -166,6 +182,51 @@ def _strip_harmony_tags(text: str) -> str:
     if not text:
         return ""
     return _HARMONY_TAG_PATTERN.sub("", text).strip()
+
+
+def _detect_plain_tool_chunks(text: str) -> List[ToolCallChunk]:
+    chunks: List[ToolCallChunk] = []
+    for index, match in enumerate(_PLAIN_TOOL_PATTERN.finditer(text), start=1):
+        xml_payload = match.group(0)
+        name = match.group("name")
+        chunks.append(
+            ToolCallChunk(
+                call_id=f"plain_tool_{index}",
+                name=name,
+                arguments=xml_payload,
+            )
+        )
+    return chunks
+
+
+def _strip_plain_tools(text: str) -> tuple[str, List[ToolCallChunk]]:
+    if not text:
+        return "", []
+    chunks = _detect_plain_tool_chunks(text)
+    cleaned = text
+    for chunk in chunks:
+        snippet = chunk.arguments.strip()
+        if snippet:
+            cleaned = cleaned.replace(snippet, "").strip()
+    return cleaned, chunks
+
+
+def _dedupe_tool_chunks(chunks: List[ToolCallChunk]) -> List[ToolCallChunk]:
+    seen = set()
+    unique: List[ToolCallChunk] = []
+    for chunk in chunks:
+        key = (chunk.name, chunk.arguments)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(chunk)
+    return unique
+
+
+def _limit_tool_chunks(chunks: List[ToolCallChunk]) -> List[ToolCallChunk]:
+    if len(chunks) <= 1:
+        return chunks
+    return [chunks[-1]]
 
 
 def _extract_channel_segments(raw: str, channel: str) -> List[str]:
@@ -211,10 +272,6 @@ def _normalize_kilocode_payload(payload: Dict[str, Any], mode: ProxyMode) -> Dic
         if isinstance(flattened, str):
             message["content"] = flattened
         content = message.get("content")
-
-        reasoning = message.pop("reasoning_content", None)
-        if isinstance(reasoning, str) and reasoning.strip():
-            message.setdefault("thinking", reasoning.strip())
 
         if not isinstance(content, str):
             continue
@@ -493,6 +550,9 @@ async def _streaming_response(payload: Dict[str, Any], request: Request, request
         if finish_sent:
             return b""
         finish_sent = True
+        finish_reason = reason
+        if forwarded_tool_chunks and not final_output_emitted:
+            finish_reason = "tool_calls"
         body = {
             "id": chunk_id,
             "object": "chat.completion.chunk",
@@ -502,7 +562,7 @@ async def _streaming_response(payload: Dict[str, Any], request: Request, request
                 {
                     "index": 0,
                     "delta": {},
-                    "finish_reason": reason,
+                    "finish_reason": finish_reason,
                 }
             ],
         }
@@ -569,6 +629,9 @@ async def _streaming_response(payload: Dict[str, Any], request: Request, request
                                     yield finish_chunk
                                 continue
                         elif isinstance(chunk, ToolCallChunk):
+                            if not role_sent:
+                                role_sent = True
+                                yield build_delta({"role": "assistant"})
                             tool_outputs = _emit_tool_chunk(
                                 chunk,
                                 config.proxy_mode,
@@ -617,6 +680,9 @@ async def _streaming_response(payload: Dict[str, Any], request: Request, request
     finally:
         for chunk in parser.close():
             if isinstance(chunk, FinalChunk):
+                if not role_sent:
+                    role_sent = True
+                    yield build_delta({"role": "assistant"})
                 raw_text = chunk.text
                 text_payload = _apply_prefix_filter(raw_text)
                 if log_prefix_debug:
@@ -644,6 +710,9 @@ async def _streaming_response(payload: Dict[str, Any], request: Request, request
                         yield finish_chunk
                     continue
             elif isinstance(chunk, ToolCallChunk):
+                if not role_sent:
+                    role_sent = True
+                    yield build_delta({"role": "assistant"})
                 tool_outputs = _emit_tool_chunk(
                     chunk,
                     config.proxy_mode,
@@ -756,12 +825,38 @@ def _normalize_non_streaming(
         message = choice.get("message")
         if not isinstance(message, dict):
             continue
+        reasoning_tools: List[ToolCallChunk] = []
+        reasoning = message.pop("reasoning_content", None)
+        if isinstance(reasoning, str) and reasoning.strip():
+            cleaned_reasoning, reasoning_tools = _strip_plain_tools(reasoning)
+            if cleaned_reasoning:
+                message.setdefault("thinking", cleaned_reasoning)
         content = message.get("content")
         if not isinstance(content, str):
             continue
         final_text, tools, used_fallback = _parse_full_text(content)
+        if reasoning_tools:
+            tools.extend(reasoning_tools)
+        tools = _dedupe_tool_chunks(tools)
+        tools = _limit_tool_chunks(tools)
+
+        final_payload_text = final_text
+        suppress_final_for_tools = False
+        if tools and mode_value in {ProxyMode.OPENAI_TOOL_CALLS.value, ProxyMode.KILOCODE.value}:
+            if used_fallback and final_text.strip() and "<" not in final_text:
+                suppress_final_for_tools = True
+                final_payload_text = ""
+
+        kilocode_plain_snippets: List[str] = []
+        if mode_value == ProxyMode.KILOCODE.value:
+            for tool in tools:
+                if tool.call_id.startswith("plain_tool_"):
+                    snippet = tool.arguments.strip()
+                    if snippet and snippet not in kilocode_plain_snippets:
+                        kilocode_plain_snippets.append(snippet)
+
         if mode_value == ProxyMode.FINAL_ONLY.value:
-            message["content"] = final_text
+            message["content"] = final_payload_text
             message.pop("tool_calls", None)
         elif mode_value == ProxyMode.FINAL_PLUS_TOOLS_TEXT.value:
             tool_text = "".join(
@@ -770,9 +865,14 @@ def _normalize_non_streaming(
             message["content"] = f"{final_text}{tool_text}"
             message.pop("tool_calls", None)
         elif mode_value in {ProxyMode.OPENAI_TOOL_CALLS.value, ProxyMode.KILOCODE.value}:
-            normalized_text = final_text
+            normalized_text = final_payload_text
             if mode_value == ProxyMode.KILOCODE.value:
-                normalized_text = strip_channel_prefix(final_text)
+                normalized_text = strip_channel_prefix(final_payload_text)
+                text_blocks: List[str] = []
+                if normalized_text.strip():
+                    text_blocks.append(normalized_text.strip())
+                text_blocks.extend(kilocode_plain_snippets)
+                normalized_text = "\n".join(text_blocks).strip()
             message["content"] = normalized_text
             if tools:
                 message["tool_calls"] = [
@@ -789,9 +889,19 @@ def _normalize_non_streaming(
             else:
                 message.pop("tool_calls", None)
 
-        if final_text:
+        if tools and mode_value in {ProxyMode.OPENAI_TOOL_CALLS.value, ProxyMode.KILOCODE.value}:
+            choice["finish_reason"] = "tool_calls"
+            if not message.get("content"):
+                if kilocode_plain_snippets and mode_value == ProxyMode.KILOCODE.value:
+                    message["content"] = "\n".join(kilocode_plain_snippets)
+                else:
+                    message["content"] = ""
+
+        visible_final_text = final_payload_text if not suppress_final_for_tools else ""
+
+        if visible_final_text:
             metrics.observe_final_chunk("chat_completions", False)
-        if used_fallback and final_text:
+        if used_fallback and visible_final_text:
             metrics.observe_parser_fallback("chat_completions")
         if tools and mode_value != ProxyMode.FINAL_ONLY.value:
             for _ in tools:
@@ -839,9 +949,22 @@ def _parse_full_text(content: str) -> tuple[str, List[ToolCallChunk], bool]:
     if not final_parts:
         combined = extract_final_text(raw_text)
         used_fallback = True
+    plain_tool_chunks: List[ToolCallChunk] = []
+    if not tool_chunks:
+        plain_tool_chunks = _detect_plain_tool_chunks(raw_text)
+        if plain_tool_chunks:
+            tool_chunks.extend(plain_tool_chunks)
+            used_fallback = True
+            if not final_parts:
+                prefix = ""
 
     prefix_clean = _strip_harmony_tags(prefix).strip()
     combined = combined.strip()
+    if plain_tool_chunks:
+        for chunk in plain_tool_chunks:
+            snippet = chunk.arguments.strip()
+            if snippet:
+                combined = combined.replace(snippet, "").strip()
     if prefix_clean:
         if not combined:
             combined = prefix_clean
@@ -849,6 +972,10 @@ def _parse_full_text(content: str) -> tuple[str, List[ToolCallChunk], bool]:
             if combined != prefix_clean and prefix_clean not in combined:
                 combined = f"{prefix_clean}\n\n{combined}"
 
+    tool_chunks = _dedupe_tool_chunks(tool_chunks)
+    tool_chunks = _limit_tool_chunks(tool_chunks)
+    if not combined and tool_chunks:
+        combined = tool_chunks[-1].arguments
     return combined, tool_chunks, used_fallback
 
 

@@ -53,6 +53,41 @@ HARMONY_WITH_LEADING_PLAIN = (
     "<|end|>"
 )
 
+HARMONY_PLAIN_TOOL_ONLY = (
+    "<|start|>assistant"
+    "<|channel|>commentary"
+    "<|message|><update_todo_list>\n"
+    "<todos>\n"
+    "[ ] task\n"
+    "</todos>\n"
+    "</update_todo_list>"
+)
+
+HARMONY_PLAIN_CODEBASE_SEARCH = (
+    "<|start|>assistant"
+    "<|channel|>commentary"
+    "<|message|><codebase_search>\n"
+    "<query>__builtin_</query>\n"
+    "</codebase_search>"
+)
+
+RAW_CODEBASE_SEARCH_ONLY = (
+    "<codebase_search>\n"
+    "<query>__builtin_</query>\n"
+    "</codebase_search>"
+)
+
+MULTI_CODEBASE_SEARCH = (
+    "<|start|>assistant"
+    "<|channel|>commentary"
+    "<|message|><codebase_search>\n"
+    "<query>asm</query>\n"
+    "</codebase_search>"
+    "<codebase_search>\n"
+    "<query>__builtin_</query>\n"
+    "</codebase_search>"
+)
+
 
 def make_config(**overrides):
     base = {
@@ -171,6 +206,78 @@ def test_normalize_non_streaming_kilocode_handles_plain_prefix():
     assert content == "Result text"
 
 
+def test_normalize_non_streaming_kilocode_extracts_plain_tool():
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": HARMONY_PLAIN_TOOL_ONLY,
+                    "reasoning_content": "Planning step <update_todo_list>\n<todos>\n[ ] task\n</todos>\n</update_todo_list>",
+                }
+            }
+        ]
+    }
+    result = _normalize_non_streaming(copy.deepcopy(payload), ProxyMode.KILOCODE)
+    message = result["choices"][0]["message"]
+    assert "<update_todo_list>" in message["content"]
+    assert message["tool_calls"][0]["function"]["name"] == "update_todo_list"
+    assert "<todos>" in message["tool_calls"][0]["function"]["arguments"]
+    assert len(message["tool_calls"]) == 1
+
+
+def test_normalize_non_streaming_kilocode_extracts_codebase_search_tool():
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": HARMONY_PLAIN_CODEBASE_SEARCH,
+                }
+            }
+        ]
+    }
+    result = _normalize_non_streaming(copy.deepcopy(payload), ProxyMode.KILOCODE)
+    message = result["choices"][0]["message"]
+    assert message["content"].startswith("<codebase_search>")
+    assert message["tool_calls"][0]["function"]["name"] == "codebase_search"
+    assert "<query>__builtin_</query>" in message["tool_calls"][0]["function"]["arguments"]
+
+
+def test_normalize_non_streaming_handles_raw_codebase_search_xml():
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": RAW_CODEBASE_SEARCH_ONLY,
+                }
+            }
+        ]
+    }
+    result = _normalize_non_streaming(copy.deepcopy(payload), ProxyMode.KILOCODE)
+    message = result["choices"][0]["message"]
+    assert message["content"].startswith("<codebase_search>")
+    assert message["tool_calls"][0]["function"]["name"] == "codebase_search"
+
+
+def test_normalize_non_streaming_limits_to_single_tool_call():
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": MULTI_CODEBASE_SEARCH,
+                }
+            }
+        ]
+    }
+    result = _normalize_non_streaming(copy.deepcopy(payload), ProxyMode.KILOCODE)
+    message = result["choices"][0]["message"]
+    assert len(message["tool_calls"]) == 1
+    assert "__builtin_" in message["tool_calls"][0]["function"]["arguments"]
+
+
 def test_emit_tool_chunk_modes():
     tool = ToolCallChunk(call_id="call_42", name="execute", arguments="{}")
     captured = []
@@ -241,3 +348,41 @@ def test_normalize_non_streaming_fallback_on_malformed_final():
     }
     result = _normalize_non_streaming(payload, ProxyMode.FINAL_ONLY)
     assert result["choices"][0]["message"]["content"] == "Recovered output"
+
+
+def test_normalize_non_streaming_sets_tool_finish_reason_from_reasoning():
+    reasoning = (
+        "Need to run codebase_search."
+        "<|start|>assistant<|channel|>commentary"
+        "<|message|><codebase_search>\n"
+        "<query>asm __asm__ __builtin_</query>\n"
+        "</codebase_search>"
+    )
+    payload = {
+        "choices": [
+            {
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": reasoning,
+                },
+            }
+        ]
+    }
+
+    result_openai = _normalize_non_streaming(copy.deepcopy(payload), ProxyMode.OPENAI_TOOL_CALLS)
+    choice_openai = result_openai["choices"][0]
+    assert choice_openai["finish_reason"] == "tool_calls"
+    msg_openai = choice_openai["message"]
+    assert msg_openai["content"] == ""
+    assert msg_openai["tool_calls"][0]["function"]["name"] == "codebase_search"
+    assert "codebase_search" in msg_openai["thinking"]
+
+    result_kilocode = _normalize_non_streaming(copy.deepcopy(payload), ProxyMode.KILOCODE)
+    choice_kilocode = result_kilocode["choices"][0]
+    assert choice_kilocode["finish_reason"] == "tool_calls"
+    msg_kilocode = choice_kilocode["message"]
+    assert "<codebase_search>" in msg_kilocode["content"]
+    assert msg_kilocode["tool_calls"][0]["function"]["name"] == "codebase_search"
+    assert "codebase_search" in msg_kilocode["thinking"]

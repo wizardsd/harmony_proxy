@@ -194,3 +194,159 @@ def test_llm_kilocode_multisegment_user_content_is_flattened():
     assert isinstance(forwarded_messages[1]["content"], str)
     assert "<task>Summarise recent patches</task>" in forwarded_messages[1]["content"]
     assert "<environment_details>" in forwarded_messages[1]["content"]
+
+
+@pytest.mark.skipif(
+    not os.getenv("UPSTREAM_BASE_URL"),
+    reason="UPSTREAM_BASE_URL must point at a running llama.cpp-compatible server.",
+)
+def test_llm_kilocode_plain_tool_xml_becomes_tool_call():
+    class PlainToolUpstream:
+        async def chat_completions(self, payload, trace_id=None):  # type: ignore[override]
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": (
+                                "<|start|>assistant"
+                                "<|channel|>commentary"
+                                "<|message|><update_todo_list>\n"
+                                "<todos>\n"
+                                "[ ] Investigate\n"
+                                "</todos>\n"
+                                "</update_todo_list>"
+                            ),
+                        }
+                    }
+                ]
+            }
+
+        async def stream_chat_completions(self, payload, trace_id=None):  # pragma: no cover
+            raise AssertionError("streaming not expected in this test")
+
+        async def aclose(self):  # pragma: no cover
+            pass
+
+    payload = {
+        "model": os.getenv("LLM_MODEL", "gpt-oss"),
+        "messages": [
+            {"role": "user", "content": "Trigger a todo list update."},
+        ],
+    }
+
+    with TestClient(app) as client:
+        client.app.state.upstream = PlainToolUpstream()  # type: ignore[attr-defined]
+        response = client.post("/v1/chat/completions", json=payload)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    message = body["choices"][0]["message"]
+    assert message["content"].startswith("<update_todo_list>")
+    assert message["tool_calls"][0]["function"]["name"] == "update_todo_list"
+    assert "<todos>" in message["tool_calls"][0]["function"]["arguments"]
+
+
+@pytest.mark.skipif(
+    not os.getenv("UPSTREAM_BASE_URL"),
+    reason="UPSTREAM_BASE_URL must point at a running llama.cpp-compatible server.",
+)
+def test_llm_kilocode_plain_codebase_search_becomes_tool_call():
+    class CodebaseToolUpstream:
+        async def chat_completions(self, payload, trace_id=None):  # type: ignore[override]
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": (
+                                "<|start|>assistant"
+                                "<|channel|>commentary"
+                                "<|message|><codebase_search>\n"
+                                "<query>__builtin_</query>\n"
+                                "</codebase_search>"
+                            ),
+                        }
+                    }
+                ]
+            }
+
+        async def stream_chat_completions(self, payload, trace_id=None):  # pragma: no cover
+            raise AssertionError("streaming not expected in this test")
+
+        async def aclose(self):  # pragma: no cover
+            pass
+
+    payload = {
+        "model": os.getenv("LLM_MODEL", "gpt-oss"),
+        "messages": [
+            {"role": "user", "content": "Search for intrinsics."},
+        ],
+    }
+
+    with TestClient(app) as client:
+        client.app.state.upstream = CodebaseToolUpstream()  # type: ignore[attr-defined]
+        response = client.post("/v1/chat/completions", json=payload)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    message = body["choices"][0]["message"]
+    assert message["content"].startswith("<codebase_search>")
+    assert message["tool_calls"][0]["function"]["name"] == "codebase_search"
+    assert "<query>__builtin_</query>" in message["tool_calls"][0]["function"]["arguments"]
+
+
+@pytest.mark.skipif(
+    not os.getenv("UPSTREAM_BASE_URL"),
+    reason="UPSTREAM_BASE_URL must point at a running llama.cpp-compatible server.",
+)
+def test_llm_kilocode_full_trace_sequence():
+    class TraceUpstream:
+        async def chat_completions(self, payload, trace_id=None):  # type: ignore[override]
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": (
+                                "<|start|>assistant"
+                                "<|channel|>commentary"
+                                "<|message|>We will search the repo.<|start|>assistant"
+                                "<|channel|>commentary"
+                                "<|message|><codebase_search>\n<query>asm</query>\n</codebase_search>"
+                                "<|start|>assistant"
+                                "<|channel|>commentary"
+                                "<|message|><codebase_search>\n<query>__builtin_</query>\n</codebase_search>"
+                                "<|start|>assistant"
+                                "<|channel|>final"
+                                "<|message|>The task will be completed by performing a semantic search across the repository for the specified patterns."
+                            ),
+                        }
+                    }
+                ]
+            }
+
+        async def stream_chat_completions(self, payload, trace_id=None):  # pragma: no cover
+            raise AssertionError("streaming not expected in this test")
+
+        async def aclose(self):  # pragma: no cover
+            pass
+
+    payload = {
+        "model": os.getenv("LLM_MODEL", "gpt-oss"),
+        "messages": [
+            {"role": "user", "content": "First orchestrator request."},
+        ],
+    }
+
+    with TestClient(app) as client:
+        client.app.state.upstream = TraceUpstream()  # type: ignore[attr-defined]
+        response = client.post("/v1/chat/completions", json=payload)
+
+    assert response.status_code == 200, response.text
+    choice = response.json()["choices"][0]
+    message = choice["message"]
+    assert choice["finish_reason"] == "tool_calls"
+    assert message["tool_calls"][0]["function"]["name"] == "codebase_search"
+    assert "<query>__builtin_</query>" in message["tool_calls"][0]["function"]["arguments"]
+    assert message["content"].strip().startswith("<codebase_search>")
