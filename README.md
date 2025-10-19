@@ -20,6 +20,7 @@ without modifications.
   - `final_only` (default): discard Harmony tool calls entirely.
   - `final_plus_tools_text`: renders tool calls as human-readable bracket blocks.
   - `openai_tool_calls`: maps Harmony tool calls to OpenAI `tool_calls` objects.
+  - `kilocode`: same as `openai_tool_calls` but strips leading channel labels so Kilo Code UX shows clean prose.
 - Supports timeout guards, Harmony stop tokens (`<|return|>`, `<|call|>`), and extra
   stop sequences via configuration.
 - Resilient upstream adapter with bounded retries/backoff and a `/readyz` endpoint that
@@ -58,7 +59,7 @@ Environment variables:
 | Variable | Default | Description |
 | --- | --- | --- |
 | `UPSTREAM_BASE_URL` | `http://localhost:8080/v1` | Base URL of the upstream OpenAI-compatible server. |
-| `PROXY_MODE` | `final_only` | Output mode: `final_only`, `final_plus_tools_text`, `openai_tool_calls`. |
+| `PROXY_MODE` | `final_only` | Output mode: `final_only`, `final_plus_tools_text`, `openai_tool_calls`, `kilocode` (OpenAI tool calls plus channel-prefix stripping for Kilo Code clients). |
 | `HARMONY_ENCODING_NAME` | `HarmonyGptOss` | Harmony encoding to initialise the parser with. |
 | `CONNECT_TIMEOUT` | `10.0` | Connection timeout for upstream requests (seconds). |
 | `READ_TIMEOUT` | `120.0` | Read timeout for upstream responses (seconds). |
@@ -70,6 +71,8 @@ Environment variables:
 | `LOG_LEVEL` | `INFO` | Logging verbosity. |
 | `METRICS_ENABLED` | `true` | Toggle Prometheus metrics collection and `/metrics`. |
 | `PREPEND_MISSING_HARMONY_START` | `true` | When true, injects `<|start|>assistant` if upstream omits it (workaround for non-compliant streams). |
+| `TRACE_LOG_PATH` | *(empty)* | When set, append JSON-lines trace entries with upstream requests and responses to this file path. |
+| `TRACE_MAX_STRING_LENGTH` | *(empty)* | When set (>0), long string fields in trace payloads are compacted to this many characters with a length summary appended. |
 
 Environment variables can be provided via `.env`, exported in the shell, or using
 PowerShell's `setx`/`$env:` for Windows users.

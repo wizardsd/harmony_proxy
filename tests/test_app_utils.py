@@ -1,7 +1,13 @@
 import copy
 from types import SimpleNamespace
 
-from harmony_proxy.app import _apply_stop_tokens, _emit_tool_chunk, _normalize_non_streaming
+from harmony_proxy.app import (
+    ChannelPrefixStripper,
+    _apply_stop_tokens,
+    _emit_tool_chunk,
+    _normalize_non_streaming,
+    strip_channel_prefix,
+)
 from harmony_proxy.config import ProxyMode
 from harmony_proxy.parser import ToolCallChunk
 
@@ -15,6 +21,18 @@ HARMONY_WITH_TOOL = (
     "<|start|>assistant"
     "<|channel|>final"
     "<|message|>Result text"
+    "<|end|>"
+)
+
+HARMONY_WITH_TOOL_PREFIXED = (
+    "<|start|>assistant"
+    "<|channel|>commentary to=tool_x"
+    "<|message|>{\"arg\":1}"
+    "<|call|>"
+    "<|end|>"
+    "<|start|>assistant"
+    "<|channel|>final"
+    "<|message|>analysis: Result text"
     "<|end|>"
 )
 
@@ -32,6 +50,20 @@ def make_config(**overrides):
     }
     base.update(overrides)
     return SimpleNamespace(**base)
+
+
+def test_channel_prefix_stripper_handles_chunked_prefix():
+    stripper = ChannelPrefixStripper()
+    assert stripper.feed("ana") == ""
+    assert stripper.feed("lysis") == ""
+    assert stripper.feed(":  Result") == "Result"
+    assert stripper.feed(" continues") == " continues"
+
+
+def test_strip_channel_prefix_helper():
+    assert strip_channel_prefix("analysis\nAnswer") == "Answer"
+    assert strip_channel_prefix("final Response") == "Response"
+    assert strip_channel_prefix("Hello") == "Hello"
 
 
 def test_apply_stop_tokens_inserts_defaults_when_missing():
@@ -93,6 +125,25 @@ def test_normalize_non_streaming_openai_tool_calls():
     assert message["tool_calls"][0]["function"]["arguments"] == "{\"arg\":1}"
 
 
+def test_normalize_non_streaming_kilocode():
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": HARMONY_WITH_TOOL_PREFIXED,
+                }
+            }
+        ]
+    }
+    result = _normalize_non_streaming(copy.deepcopy(payload), ProxyMode.KILOCODE)
+    message = result["choices"][0]["message"]
+    assert message["content"] == "Result text"
+    tool_call = message["tool_calls"][0]["function"]
+    assert tool_call["name"] == "tool_x"
+    assert tool_call["arguments"] == "{\"arg\":1}"
+
+
 def test_emit_tool_chunk_modes():
     tool = ToolCallChunk(call_id="call_42", name="execute", arguments="{}")
     captured = []
@@ -130,6 +181,18 @@ def test_emit_tool_chunk_modes():
     result = _emit_tool_chunk(
         tool,
         ProxyMode.OPENAI_TOOL_CALLS,
+        fake_build,
+        {},
+        "chat_completions",
+    )
+    assert result == [b"bytes"]
+    assert captured[0]["tool_calls"][0]["function"]["name"] == "execute"
+
+    # KILOCODE -> same as OPENAI_TOOL_CALLS
+    captured.clear()
+    result = _emit_tool_chunk(
+        tool,
+        ProxyMode.KILOCODE,
         fake_build,
         {},
         "chat_completions",

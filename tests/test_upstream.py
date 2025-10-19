@@ -1,15 +1,16 @@
 import asyncio
+import json
 
 import httpx
 import pytest
 
-from harmony_proxy import upstream as upstream_module
+from harmony_proxy import trace, upstream as upstream_module
 from harmony_proxy.upstream import UpstreamClient, UpstreamError
 
 
-async def _collect_stream(client: UpstreamClient, payload):
+async def _collect_stream(client: UpstreamClient, payload, trace_id=None):
     events = []
-    async for event in client.stream_chat_completions(payload):
+    async for event in client.stream_chat_completions(payload, trace_id=trace_id):
         events.append(event)
     return events
 
@@ -215,3 +216,75 @@ def test_check_readiness_raises_after_exhausting_retries():
             run()
     finally:
         asyncio.run(client.aclose())
+
+
+def test_chat_completions_writes_trace(tmp_path):
+    path = tmp_path / "trace.jsonl"
+    trace.configure(str(path))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    transport = httpx.MockTransport(handler)
+    client = UpstreamClient(
+        base_url="http://upstream.test",
+        connect_timeout=0.1,
+        read_timeout=0.1,
+        max_retries=0,
+        retry_backoff_seconds=0,
+        transport=transport,
+    )
+
+    result = asyncio.run(client.chat_completions({"messages": []}, trace_id="trace-1"))
+    asyncio.run(client.aclose())
+
+    assert result["choices"][0]["message"]["content"] == "ok"
+
+    entries = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    related = [entry for entry in entries if entry["request_id"] == "trace-1"]
+    events = {entry["event"] for entry in related}
+    assert "upstream_request" in events
+    assert "upstream_response" in events
+
+
+def test_stream_chat_completions_writes_trace(tmp_path):
+    sse_body = (
+        "event: message\n"
+        'data: {"choices":[{"delta":{"content":"<|start|>assistant<|channel|>final<|message|>Hello<|end|>"}}]}\n'
+        "\n"
+        "event: message\n"
+        "data: [DONE]\n"
+        "\n"
+    )
+
+    path = tmp_path / "stream_trace.jsonl"
+    trace.configure(str(path))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=sse_body,
+        )
+
+    transport = httpx.MockTransport(handler)
+    client = UpstreamClient(
+        base_url="http://upstream.test",
+        connect_timeout=0.1,
+        read_timeout=0.1,
+        max_retries=0,
+        retry_backoff_seconds=0,
+        transport=transport,
+    )
+
+    events = asyncio.run(_collect_stream(client, {"messages": [], "stream": True, "model": "dummy"}, trace_id="trace-stream"))
+    asyncio.run(client.aclose())
+
+    assert events, "expected SSE events"
+
+    entries = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    related = [entry for entry in entries if entry["request_id"] == "trace-stream"]
+    event_names = {entry["event"] for entry in related}
+    assert "upstream_request" in event_names
+    assert "upstream_event" in event_names
+    assert "upstream_stream_complete" in event_names
